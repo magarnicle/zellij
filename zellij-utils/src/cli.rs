@@ -67,6 +67,10 @@ pub struct CliArgs {
     #[clap(subcommand)]
     pub command: Option<Command>,
 
+    /// Create a session but detach from it straight away
+    #[clap(short, long, value_parser)]
+    pub detached: bool,
+
     /// Specify emitting additional debug information
     #[clap(short, long, value_parser)]
     pub debug: bool,

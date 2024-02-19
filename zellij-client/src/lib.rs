@@ -172,6 +172,7 @@ pub fn start_client(
     let clear_client_terminal_attributes = "\u{1b}[?1l\u{1b}=\u{1b}[r\u{1b}[?1000l\u{1b}[?1002l\u{1b}[?1003l\u{1b}[?1005l\u{1b}[?1006l\u{1b}[?12l";
     let take_snapshot = "\u{1b}[?1049h";
     let bracketed_paste = "\u{1b}[?2004h";
+    let start_detached = opts.detached;
     os_input.unset_raw_mode(0).unwrap();
 
     if !is_a_reconnect {
@@ -407,99 +408,103 @@ pub fn start_client(
         .expect("cannot write to stdout");
     stdout.flush().expect("could not flush");
 
-    loop {
-        let (client_instruction, mut err_ctx) = if !loading && !pending_instructions.is_empty() {
-            // there are buffered instructions, we need to go through them before processing the
-            // new ones
-            pending_instructions.remove(0)
-        } else {
-            receive_client_instructions
-                .recv()
-                .expect("failed to receive app instruction on channel")
-        };
+    if start_detached {
+        os_input.send_to_server(ClientToServerMsg::ClientExited);
+    } else {
+        loop {
+            let (client_instruction, mut err_ctx) = if !loading && !pending_instructions.is_empty() {
+                // there are buffered instructions, we need to go through them before processing the
+                // new ones
+                pending_instructions.remove(0)
+            } else {
+                receive_client_instructions
+                    .recv()
+                    .expect("failed to receive app instruction on channel")
+            };
 
-        if loading {
-            // when the app is still loading, we buffer instructions and show a loading screen
-            match client_instruction {
-                ClientInstruction::StartedParsingStdinQuery => {
-                    stdout
-                        .write_all("Querying terminal emulator for \u{1b}[32;1mdefault colors\u{1b}[m and \u{1b}[32;1mpixel/cell\u{1b}[m ratio...".as_bytes())
-                        .expect("cannot write to stdout");
-                    stdout.flush().expect("could not flush");
-                },
-                ClientInstruction::DoneParsingStdinQuery => {
-                    stdout
-                        .write_all("done".as_bytes())
-                        .expect("cannot write to stdout");
-                    stdout.flush().expect("could not flush");
-                    loading = false;
-                },
-                instruction => {
-                    pending_instructions.push((instruction, err_ctx));
-                },
+            if loading {
+                // when the app is still loading, we buffer instructions and show a loading screen
+                match client_instruction {
+                    ClientInstruction::StartedParsingStdinQuery => {
+                        stdout
+                            .write_all("Querying terminal emulator for \u{1b}[32;1mdefault colors\u{1b}[m and \u{1b}[32;1mpixel/cell\u{1b}[m ratio...".as_bytes())
+                            .expect("cannot write to stdout");
+                        stdout.flush().expect("could not flush");
+                    },
+                    ClientInstruction::DoneParsingStdinQuery => {
+                        stdout
+                            .write_all("done".as_bytes())
+                            .expect("cannot write to stdout");
+                        stdout.flush().expect("could not flush");
+                        loading = false;
+                    },
+                    instruction => {
+                        pending_instructions.push((instruction, err_ctx));
+                    },
+                }
+                continue;
             }
-            continue;
-        }
 
-        err_ctx.add_call(ContextType::Client((&client_instruction).into()));
+            err_ctx.add_call(ContextType::Client((&client_instruction).into()));
 
-        match client_instruction {
-            ClientInstruction::Exit(reason) => {
-                os_input.send_to_server(ClientToServerMsg::ClientExited);
+            match client_instruction {
+                ClientInstruction::Exit(reason) => {
+                    os_input.send_to_server(ClientToServerMsg::ClientExited);
 
-                if let ExitReason::Error(_) = reason {
-                    handle_error(reason.to_string());
-                }
-                exit_msg = reason.to_string();
-                break;
-            },
-            ClientInstruction::Error(backtrace) => {
-                handle_error(backtrace);
-            },
-            ClientInstruction::Render(output) => {
-                let mut stdout = os_input.get_stdout_writer();
-                if let Some(sync) = synchronised_output {
+                    if let ExitReason::Error(_) = reason {
+                        handle_error(reason.to_string());
+                    }
+                    exit_msg = reason.to_string();
+                    break;
+                },
+                ClientInstruction::Error(backtrace) => {
+                    handle_error(backtrace);
+                },
+                ClientInstruction::Render(output) => {
+                    let mut stdout = os_input.get_stdout_writer();
+                    if let Some(sync) = synchronised_output {
+                        stdout
+                            .write_all(sync.start_seq())
+                            .expect("cannot write to stdout");
+                    }
                     stdout
-                        .write_all(sync.start_seq())
+                        .write_all(output.as_bytes())
                         .expect("cannot write to stdout");
-                }
-                stdout
-                    .write_all(output.as_bytes())
-                    .expect("cannot write to stdout");
-                if let Some(sync) = synchronised_output {
-                    stdout
-                        .write_all(sync.end_seq())
-                        .expect("cannot write to stdout");
-                }
-                stdout.flush().expect("could not flush");
-            },
-            ClientInstruction::UnblockInputThread => {
-                command_is_executing.unblock_input_thread();
-            },
-            ClientInstruction::SwitchToMode(input_mode) => {
-                send_input_instructions
-                    .send(InputInstruction::SwitchToMode(input_mode))
-                    .unwrap();
-            },
-            ClientInstruction::Log(lines_to_log) => {
-                for line in lines_to_log {
-                    log::info!("{line}");
-                }
-            },
-            ClientInstruction::LogError(lines_to_log) => {
-                for line in lines_to_log {
-                    log::error!("{line}");
-                }
-            },
-            ClientInstruction::SwitchSession(connect_to_session) => {
-                reconnect_to_session = Some(connect_to_session);
-                os_input.send_to_server(ClientToServerMsg::ClientExited);
-                break;
-            },
-            ClientInstruction::SetSynchronizedOutput(enabled) => {
-                synchronised_output = enabled;
-            },
-            _ => {},
+                    if let Some(sync) = synchronised_output {
+                        stdout
+                            .write_all(sync.end_seq())
+                            .expect("cannot write to stdout");
+                    }
+                    stdout.flush().expect("could not flush");
+                },
+                ClientInstruction::UnblockInputThread => {
+                    command_is_executing.unblock_input_thread();
+                },
+                ClientInstruction::SwitchToMode(input_mode) => {
+                    send_input_instructions
+                        .send(InputInstruction::SwitchToMode(input_mode))
+                        .unwrap();
+                },
+                ClientInstruction::Log(lines_to_log) => {
+                    for line in lines_to_log {
+                        log::info!("{line}");
+                    }
+                },
+                ClientInstruction::LogError(lines_to_log) => {
+                    for line in lines_to_log {
+                        log::error!("{line}");
+                    }
+                },
+                ClientInstruction::SwitchSession(connect_to_session) => {
+                    reconnect_to_session = Some(connect_to_session);
+                    os_input.send_to_server(ClientToServerMsg::ClientExited);
+                    break;
+                },
+                ClientInstruction::SetSynchronizedOutput(enabled) => {
+                    synchronised_output = enabled;
+                },
+                _ => {},
+            }
         }
     }
 
