@@ -412,7 +412,8 @@ pub fn start_client(
         os_input.send_to_server(ClientToServerMsg::ClientExited);
     } else {
         loop {
-            let (client_instruction, mut err_ctx) = if !loading && !pending_instructions.is_empty() {
+            let (client_instruction, mut err_ctx) = if !loading && !pending_instructions.is_empty()
+            {
                 // there are buffered instructions, we need to go through them before processing the
                 // new ones
                 pending_instructions.remove(0)
